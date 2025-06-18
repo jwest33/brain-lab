@@ -14,8 +14,6 @@ bp.math.set_platform('cpu')
 # ============================================================================
 
 class LIFNeuron(bp.dyn.NeuDyn):
-    """Leaky Integrate-and-Fire neuron with adaptive threshold"""
-class LIFNeuron(bp.dyn.NeuDyn):
     """Leaky Integrate-and-Fire neuron with adaptive threshold and heterogeneity"""
     def __init__(self, size, V_rest=-65., V_th=-50., V_reset=-65., tau=20., 
                  tau_ref=5., tau_adapt=100., a_adapt=0.01, bias=None,
@@ -132,11 +130,13 @@ class PoissonInput(bp.dyn.NeuDyn):
         
     def update(self, rates=None):
         if rates is not None:
-            self.rates[:] = rates  # Use assignment to existing variable
-        # Generate spikes based on Poisson process
-        prob = self.rates * 0.001 * 1.5  # Increased probability to generate more spikes
-        # Fix: use self.num instead of self.size for random generation
+            self.rates.value = rates
+        
+        # Correctly calculate spike probability based on rate (in Hz) and time step (in ms)
+        prob = self.rates * (bm.dt / 1000.)
         self.spike.value = bm.random.rand(self.num) < prob
+
+        
         return self.spike.value
 
 
@@ -152,48 +152,57 @@ class ExponentialSynapse(bp.dyn.SynConn):
         # Parameters
         self.g_max = g_max
         self.tau = tau
-        self.delay = int(delay)
+        
+        # Correctly calculate the delay in simulation steps
+        self.delay_step = int(np.round(delay / bm.get_dt()))
         
         # Get connection matrix
         self.conn_mat = self.conn.require('conn_mat')
         
-        # Initialize weights with some randomness if excitatory
+        # Initialize weights
         if g_max > 0:
-            # Random weights between 0.3 and 1.0 times g_max for more variation
             self.weights = bm.Variable(
                 self.conn_mat * bm.random.uniform(0.3, 1.0, self.conn_mat.shape) * g_max
             )
         else:
-            # For inhibitory, use fixed strength
             self.weights = bm.Variable(self.conn_mat * g_max)
         
         # Synaptic conductance
         self.g = bm.Variable(bm.zeros(post.num))
         
-        # Spike history buffer for delays
-        self.spike_buffer = bm.Variable(bm.zeros((self.delay, pre.num), dtype=bool))
-        
+        # Spike history buffer for delays (if delay is used)
+        if self.delay_step > 0:
+            self.spike_buffer = bm.Variable(bm.zeros((self.delay_step, pre.num), dtype=bool))
+            
     def update(self):
-        # Update synaptic conductance with exponential decay
-        self.g.value = self.g.value * (1 - 1/self.tau)
+        # Update synaptic conductance with correct exponential decay
+        self.g.value *= bm.exp(-bm.dt / self.tau)
         
-        # Get delayed spikes
-        if self.delay > 1:
+        # Get spikes (either delayed or current)
+        if self.delay_step > 0:
+            # Get the spikes that arrived from the past
             delayed_spikes = self.spike_buffer[0]
-            # Shift buffer
-            self.spike_buffer[:-1] = self.spike_buffer[1:]
+            
+            # Shift the buffer to make room for new spikes
+            # Note: This explicit loop is clear and works fine with JIT for fixed loop counts.
+            for i in range(self.delay_step - 1):
+                self.spike_buffer[i] = self.spike_buffer[i+1]
+            
+            # Add the current spike to the end of the buffer for the future
             self.spike_buffer[-1] = self.pre.spike
         else:
+            # No delay
             delayed_spikes = self.pre.spike
         
-        # Add input from pre-synaptic spikes
+        # REMOVED the "if bm.any(delayed_spikes):" condition.
+        # This calculation is now performed unconditionally, which is JIT-compatible.
+        # If delayed_spikes is all False, the result of the dot product will be zero.
         spike_input = bm.dot(delayed_spikes.astype(bm.float32), 
                            self.weights.astype(bm.float32))
-        self.g.value = self.g.value + spike_input
+        self.g.value += spike_input
         
         # Apply conductance to post-synaptic input
-        self.post.input.value = self.post.input.value + self.g.value
-
+        self.post.input.value += self.g.value
 
 class STDPSynapse(bp.dyn.SynConn):
     """Spike-Timing Dependent Plasticity synapse"""
@@ -202,7 +211,6 @@ class STDPSynapse(bp.dyn.SynConn):
                  w_min=0., w_max=2.):
         super().__init__(pre=pre, post=post, conn=conn)
         
-        # Parameters
         self.tau = tau
         self.tau_pre = tau_pre
         self.tau_post = tau_post
@@ -211,33 +219,27 @@ class STDPSynapse(bp.dyn.SynConn):
         self.w_min = w_min
         self.w_max = w_max
         
-        # Get connection matrix shape
         self.conn_mat = self.conn.require('conn_mat')
         
-        # Synaptic weights (plastic) - initialize with random values
         self.w = bm.Variable(
             self.conn_mat * bm.random.uniform(0.5 * g_max, g_max, self.conn_mat.shape)
         )
-        
-        # Synaptic conductance
         self.g = bm.Variable(bm.zeros(post.num))
-        
-        # STDP traces
         self.trace_pre = bm.Variable(bm.zeros(pre.num))
         self.trace_post = bm.Variable(bm.zeros(post.num))
         
     def update(self):
-        # Update synaptic conductance
-        self.g.value = self.g.value * (1 - 1/self.tau)
+        # Update synaptic conductance with correct decay
+        self.g.value *= bm.exp(-bm.dt / self.tau)
         
         # Add input from pre-synaptic spikes
         spike_input = bm.dot(self.pre.spike.astype(bm.float32), 
                            (self.conn_mat * self.w).astype(bm.float32))
-        self.g.value = self.g.value + spike_input
+        self.g.value += spike_input
         
-        # Update STDP traces
-        self.trace_pre.value *= (1 - 1/self.tau_pre)
-        self.trace_post.value *= (1 - 1/self.tau_post)
+        # Update STDP traces with correct decay
+        self.trace_pre.value *= bm.exp(-bm.dt / self.tau_pre)
+        self.trace_post.value *= bm.exp(-bm.dt / self.tau_post)
         
         # Update traces for spiking neurons
         self.trace_pre.value = bm.where(self.pre.spike, 
@@ -248,32 +250,26 @@ class STDPSynapse(bp.dyn.SynConn):
                                         self.trace_post)
         
         # STDP weight updates using vectorized operations
-        # LTD: When pre-synaptic neuron spikes
         pre_spike_expanded = self.pre.spike[:, None].astype(bm.float32)
         post_trace_expanded = self.trace_post[None, :].astype(bm.float32)
         ltd_update = -self.A_post * pre_spike_expanded * post_trace_expanded * self.w
         
-        # LTP: When post-synaptic neuron spikes
         pre_trace_expanded = self.trace_pre[:, None].astype(bm.float32)
         post_spike_expanded = self.post.spike[None, :].astype(bm.float32)
         ltp_update = self.A_pre * pre_trace_expanded * post_spike_expanded * (self.w_max - self.w)
         
-        # Apply updates only where connections exist
         weight_update = (ltd_update + ltp_update) * self.conn_mat
-        self.w.value = self.w + weight_update
+        self.w.value += weight_update
         
-        # Clip weights
         self.w.value = bm.clip(self.w, self.w_min, self.w_max)
         
-        # Apply conductance to post-synaptic input
-        self.post.input.value = self.post.input.value + self.g.value
-
+        self.post.input.value += self.g.value
 
 # ============================================================================
 # Network Model
 # ============================================================================
 
-class SpikingDigitClassifier(bp.dyn.Network):
+class SpikingDigitClassifier(bp.Network):
     """Multi-layer spiking neural network for digit classification"""
     def __init__(self, n_input=64, n_hidden=100, n_output=10, 
                  use_stdp=False, connection_prob=0.5):
@@ -315,7 +311,6 @@ class SpikingDigitClassifier(bp.dyn.Network):
         )
                 
         # Input to Hidden: structured connectivity
-        # Create connections that help with digit recognition
         conn_ih = bp.conn.FixedProb(prob=connection_prob)
         if use_stdp:
             self.syn_ih = STDPSynapse(
@@ -416,7 +411,7 @@ class SpikingDigitClassifier(bp.dyn.Network):
             pre=self.output_layer,
             post=self.output_layer,
             conn=conn_oo,
-            g_max=-8.0,
+            g_max=-8.0,  # MODIFIED: Reduced inhibition from -15.0 to -8.0
             tau=2.0
         )
 
@@ -428,11 +423,11 @@ class SpikingDigitClassifier(bp.dyn.Network):
                         # Create Mexican-hat profile: nearby neurons inhibit strongly
                         dist = min(abs(i - j), n_output - abs(i - j))
                         if dist == 1:
-                            self.syn_oo.weights[i, j] *= 2.0  # Strong local inhibition
+                            self.syn_oo.weights[i, j] *= 1.5  # Reduced from 2.0
                         elif dist == 2:
-                            self.syn_oo.weights[i, j] *= 0.5  # Weak medium-range
+                            self.syn_oo.weights[i, j] *= 0.75 # Adjusted from 0.5
                         else:
-                            self.syn_oo.weights[i, j] *= 0.1  # Very weak long-range
+                            self.syn_oo.weights[i, j] *= 0.25 # Adjusted from 0.1
         
     def update(self):
         # Update input layer (pass None to use internal rates)
@@ -441,19 +436,20 @@ class SpikingDigitClassifier(bp.dyn.Network):
         # Update input to hidden connections first
         self.syn_ih.update()
         
+        # Apply lateral inhibition in the hidden layer
+        self.syn_hh.update()
+        
         # Update hidden layer neurons
         self.hidden_layer.update()
         
         # Update hidden to output connections
         self.syn_ho.update()
         
+        # Apply winner-take-all inhibition in the output layer
+        self.syn_oo.update()
+        
         # Update output layer neurons
         self.output_layer.update()
-        
-        # Apply lateral inhibition AFTER neurons have updated
-        # This creates competition between neurons that have fired
-        self.syn_hh.update()
-        self.syn_oo.update()
         
         return self.output_layer.spike.value
 
@@ -535,49 +531,43 @@ def run_classification_demo():
         sample = X_test[test_idx]
         label = y_test[test_idx]
         
-        # Convert to firing rates - use different scaling for each pixel
-        # This creates more variation in the input patterns
-        input_rates = encode_rate(sample, max_rate=150.)  # Increased max rate
         
-        # Apply spatial filtering to enhance edges (helps differentiate digits)
-        input_2d = sample.reshape(8, 8)
-        # Simple edge enhancement
-        kernel = np.array([[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]]) / 9.0
-        from scipy.ndimage import convolve
-        filtered = convolve(input_2d, kernel, mode='constant')
-        filtered = np.clip(filtered, 0, 1)
-        enhanced_rates = encode_rate(filtered.flatten(), max_rate=150.)
-        
-        # Combine original and enhanced rates
-        input_rates = 0.7 * input_rates + 0.3 * enhanced_rates
+        # Convert to firing rates
+        input_rates = encode_rate(sample, max_rate=150.)
         
         # Debug: Check input rates
         if idx == 0:
             print(f"  Debug - Input rates min: {np.min(input_rates):.1f}, max: {np.max(input_rates):.1f}, mean: {np.mean(input_rates):.1f}")
         
-        # Reset network state
-        net.input_layer.spike[:] = False
-        net.hidden_layer.V[:] = net.hidden_layer.V_rest + bm.random.uniform(-5, 5, net.n_hidden)
+        # --- FULL NETWORK STATE RESET ---
+        # 1. Reset neuron states with added randomness to break symmetry
+        net.hidden_layer.V[:] = net.hidden_layer.V_rest + bm.random.normal(0, 2.0, net.n_hidden)
+        net.output_layer.V[:] = net.output_layer.V_rest + bm.random.normal(0, 2.0, net.n_output)
+        
         net.hidden_layer.spike[:] = False
-        net.hidden_layer.refractory[:] = 0
-        net.output_layer.V[:] = net.output_layer.V_rest + bm.random.uniform(-3, 3, net.n_output)
         net.output_layer.spike[:] = False
-        net.output_layer.refractory[:] = 0
         
-        # Reset adaptations too
-        net.hidden_layer.adaptation[:] = bm.random.uniform(0, 0.5, net.n_hidden)
-        net.output_layer.adaptation[:] = bm.random.uniform(0, 0.3, net.n_output)
+        net.hidden_layer.refractory[:] = 0.
+        net.output_layer.refractory[:] = 0.
         
-        # Also reset voltage thresholds to baseline
+        # 2. Reset adaptation variables and thresholds
+        net.hidden_layer.adaptation[:] = bm.random.uniform(0, 0.1, net.n_hidden)
+        net.output_layer.adaptation[:] = bm.random.uniform(0, 0.1, net.n_output)
         net.hidden_layer.V_th[:] = net.hidden_layer.V_th_base
         net.output_layer.V_th[:] = net.output_layer.V_th_base
+
+        # 3. Reset synaptic conductances (Crucial for preventing interference between samples)
+        net.syn_ih.g[:] = 0.
+        net.syn_ho.g[:] = 0.
+        net.syn_hh.g[:] = 0.
+        net.syn_oo.g[:] = 0.
         
-        # Reset synaptic conductances
-        net.syn_ih.g[:] = 0.0
-        net.syn_ho.g[:] = bm.random.uniform(0, 0.5, net.n_output)
-        net.syn_hh.g[:] = 0.0
-        net.syn_oo.g[:] = 0.0
+        # 4. Reset input layer states
+        net.input_layer.spike[:] = False
+        net.input_layer.rates[:] = input_rates
         
+
+
         # Create runner for this sample
         runner = bp.DSRunner(
             net,
@@ -591,9 +581,6 @@ def run_classification_demo():
             dt=dt,
             progress_bar=False  # Disable progress bar for cleaner output
         )
-        
-        # Set input rates
-        net.input_layer.rates[:] = input_rates
         
         # Run simulation
         runner.run(T_present)
@@ -627,14 +614,12 @@ def run_classification_demo():
             print(f"  Debug - Max output voltage: {np.max(runner.mon['output_V']):.2f}")
             print(f"  Debug - Input spike rate: {np.mean(np.sum(runner.mon['input_spikes'], axis=0)):.1f} spikes")
             print(f"  Debug - Hidden spike rate: {np.mean(np.sum(runner.mon['hidden_spikes'], axis=0)):.1f} spikes")
-            # Check if input is actually spiking
             total_input_spikes = np.sum(runner.mon['input_spikes'])
             print(f"  Debug - Total input spikes: {total_input_spikes}")
             if total_input_spikes == 0:
                 print("  WARNING: No input spikes generated!")
-            # Check variation in output
-            if len(np.unique(output_spike_counts)) == 1:
-                print("  WARNING: All output neurons have identical spike counts!")
+            if len(np.unique(output_spike_counts)) <= 2:
+                print("  WARNING: Output neurons have very similar spike counts!")
     
     # Calculate accuracy
     accuracy = np.mean(np.array(predictions) == np.array(true_labels))
@@ -727,7 +712,7 @@ def visualize_classification_results(spike_data_list):
             ax_hidden.set_xticklabels([])
             ax_output.set_xticklabels([])
     
-    plt.tight_layout()
+    #plt.tight_layout()
     
     plt.show()
 
