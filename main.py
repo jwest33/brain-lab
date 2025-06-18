@@ -6,13 +6,192 @@ from sklearn.datasets import load_digits
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 import matplotlib.gridspec as gridspec
+import pickle
+import os
+from datetime import datetime
 
 bp.math.set_platform('cpu')
 
-# ============================================================================
-# Neuron Models
-# ============================================================================
+def save_network_weights(net, filename=None):
+    """Save network weights and parameters to a file"""
+    if filename is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"stdp_model_{timestamp}.pkl"
+    
+    # Extract all relevant weights and parameters
+    model_data = {
+        'network_params': {
+            'n_input': net.n_input,
+            'n_hidden': net.n_hidden,
+            'n_output': net.n_output,
+        },
+        'weights': {},
+        'biases': {},
+        'neuron_params': {}
+    }
+    
+    # Save synaptic weights
+    if hasattr(net.syn_ih, 'w'):
+        model_data['weights']['input_hidden'] = net.syn_ih.w.value.copy()
+    elif hasattr(net.syn_ih, 'weights'):
+        model_data['weights']['input_hidden'] = net.syn_ih.weights.value.copy()
+    
+    if hasattr(net.syn_ho, 'weights'):
+        model_data['weights']['hidden_output'] = net.syn_ho.weights.value.copy()
+    
+    if hasattr(net.syn_hh, 'weights'):
+        model_data['weights']['hidden_hidden'] = net.syn_hh.weights.value.copy()
+    
+    if hasattr(net.syn_oo, 'weights'):
+        model_data['weights']['output_output'] = net.syn_oo.weights.value.copy()
+    
+    # Save neuron parameters (heterogeneity)
+    model_data['neuron_params']['hidden'] = {
+        'V_rest': net.hidden_layer.V_rest.copy(),
+        'V_th_base': net.hidden_layer.V_th_base.copy(),
+        'V_reset': net.hidden_layer.V_reset.copy(),
+        'tau': net.hidden_layer.tau.copy(),
+        'tau_ref': net.hidden_layer.tau_ref.copy(),
+        'tau_adapt': net.hidden_layer.tau_adapt.copy(),
+        'a_adapt': net.hidden_layer.a_adapt.copy(),
+        'excitability': net.hidden_layer.excitability.value.copy()
+    }
+    
+    model_data['neuron_params']['output'] = {
+        'V_rest': net.output_layer.V_rest.copy(),
+        'V_th_base': net.output_layer.V_th_base.copy(),
+        'V_reset': net.output_layer.V_reset.copy(),
+        'tau': net.output_layer.tau.copy(),
+        'tau_ref': net.output_layer.tau_ref.copy(),
+        'tau_adapt': net.output_layer.tau_adapt.copy(),
+        'a_adapt': net.output_layer.a_adapt.copy(),
+        'excitability': net.output_layer.excitability.value.copy(),
+        'bias': net.output_layer.bias.value.copy()
+    }
+    
+    # Save connection matrices
+    model_data['connections'] = {
+        'input_hidden': net.syn_ih.conn_mat.copy() if hasattr(net.syn_ih, 'conn_mat') else None,
+        'hidden_output': net.syn_ho.conn_mat.copy() if hasattr(net.syn_ho, 'conn_mat') else None,
+    }
+    
+    # Save to file
+    with open(filename, 'wb') as f:
+        pickle.dump(model_data, f)
+    
+    print(f"Model saved to: {filename}")
+    return filename
 
+
+def load_network_weights(filename, use_stdp=True):
+    """Load network weights and parameters from a file"""
+    with open(filename, 'rb') as f:
+        model_data = pickle.load(f)
+    
+    # Create new network with same architecture
+    net = SpikingDigitClassifier(
+        n_input=model_data['network_params']['n_input'],
+        n_hidden=model_data['network_params']['n_hidden'],
+        n_output=model_data['network_params']['n_output'],
+        use_stdp=use_stdp,
+        connection_prob=0.5  # This will be overridden by loaded connections
+    )
+    
+    # Restore synaptic weights
+    if 'input_hidden' in model_data['weights']:
+        if hasattr(net.syn_ih, 'w'):
+            net.syn_ih.w.value = model_data['weights']['input_hidden'].copy()
+        elif hasattr(net.syn_ih, 'weights'):
+            net.syn_ih.weights.value = model_data['weights']['input_hidden'].copy()
+    
+    if 'hidden_output' in model_data['weights']:
+        net.syn_ho.weights.value = model_data['weights']['hidden_output'].copy()
+    
+    if 'hidden_hidden' in model_data['weights']:
+        net.syn_hh.weights.value = model_data['weights']['hidden_hidden'].copy()
+    
+    if 'output_output' in model_data['weights']:
+        net.syn_oo.weights.value = model_data['weights']['output_output'].copy()
+    
+    # Restore neuron parameters
+    if 'hidden' in model_data['neuron_params']:
+        params = model_data['neuron_params']['hidden']
+        net.hidden_layer.V_rest = params['V_rest'].copy()
+        net.hidden_layer.V_th_base = params['V_th_base'].copy()
+        net.hidden_layer.V_reset = params['V_reset'].copy()
+        net.hidden_layer.tau = params['tau'].copy()
+        net.hidden_layer.tau_ref = params['tau_ref'].copy()
+        net.hidden_layer.tau_adapt = params['tau_adapt'].copy()
+        net.hidden_layer.a_adapt = params['a_adapt'].copy()
+        net.hidden_layer.excitability.value = params['excitability'].copy()
+    
+    if 'output' in model_data['neuron_params']:
+        params = model_data['neuron_params']['output']
+        net.output_layer.V_rest = params['V_rest'].copy()
+        net.output_layer.V_th_base = params['V_th_base'].copy()
+        net.output_layer.V_reset = params['V_reset'].copy()
+        net.output_layer.tau = params['tau'].copy()
+        net.output_layer.tau_ref = params['tau_ref'].copy()
+        net.output_layer.tau_adapt = params['tau_adapt'].copy()
+        net.output_layer.a_adapt = params['a_adapt'].copy()
+        net.output_layer.excitability.value = params['excitability'].copy()
+        net.output_layer.bias.value = params['bias'].copy()
+    
+    # Restore connection matrices
+    if 'connections' in model_data and model_data['connections']['input_hidden'] is not None:
+        net.syn_ih.conn_mat = model_data['connections']['input_hidden'].copy()
+    
+    if 'connections' in model_data and model_data['connections']['hidden_output'] is not None:
+        net.syn_ho.conn_mat = model_data['connections']['hidden_output'].copy()
+    
+    print(f"Model loaded from: {filename}")
+    return net
+
+
+def list_saved_models():
+    """List all saved model files in the current directory"""
+    model_files = [f for f in os.listdir('.') if f.startswith('stdp_model_') and f.endswith('.pkl')]
+    return sorted(model_files)
+
+
+def prompt_user_for_model():
+    """Prompt user to load existing model or train new one"""
+    saved_models = list_saved_models()
+    
+    if not saved_models:
+        print("\nNo saved models found.")
+        return None
+    
+    print("\n" + "="*50)
+    print("Saved Models Found:")
+    print("="*50)
+    for i, model_file in enumerate(saved_models, 1):
+        # Extract timestamp and format nicely
+        timestamp_str = model_file.replace('stdp_model_', '').replace('.pkl', '')
+        try:
+            timestamp = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+            formatted_time = timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            print(f"{i}. {model_file} (created: {formatted_time})")
+        except:
+            print(f"{i}. {model_file}")
+    
+    print(f"\n0. Train a new model")
+    
+    while True:
+        try:
+            choice = input("\nEnter your choice (0 to train new, or model number to load): ")
+            choice = int(choice)
+            
+            if choice == 0:
+                return None
+            elif 1 <= choice <= len(saved_models):
+                return saved_models[choice - 1]
+            else:
+                print("Invalid choice. Please try again.")
+        except ValueError:
+            print("Please enter a valid number.")
+
+# Neuron Models
 class LIFNeuron(bp.dyn.NeuDyn):
     """Leaky Integrate-and-Fire neuron with adaptive threshold and heterogeneity"""
     def __init__(self, size, V_rest=-65., V_th=-50., V_reset=-65., tau=20., 
@@ -72,52 +251,64 @@ class LIFNeuron(bp.dyn.NeuDyn):
         self.excitability.value = bm.clip(self.excitability, 0.5, 1.5)
             
     def update(self, inp=None):
-        # Get total input including bias and excitability modulation
+        """Integrate one time step (units: ms).  Works for any runner dt."""
+        # ------------------------------------------------------------------
+        # Simulation time step in ms
+        # ------------------------------------------------------------------
+        dt = float(getattr(self, 'dt', bm.get_dt()))  # brainpy exposes dt
+
+        # ------------------------------------------------------------------
+        # Total synaptic + bias input (add optional external 'inp')
+        # ------------------------------------------------------------------
         total_input = (self.input.value + self.bias.value) * self.excitability.value
         if inp is not None:
-            total_input = total_input + inp
-        
-        # Add small noise to break symmetry (reduced since we have heterogeneity)
-        noise = bm.random.normal(0, 0.2, self.num)
-        total_input = total_input + noise
-            
-        # Update refractory period (now uses heterogeneous tau_ref)
-        self.refractory.value = bm.maximum(self.refractory - 1, 0)
-        
-        # Only update neurons not in refractory period
-        not_refractory = self.refractory <= 0
-        
-        # Update membrane potential for non-refractory neurons
-        # Each neuron has its own tau and V_rest
-        dV = (self.V_rest - self.V + total_input) / self.tau
-        V_new = bm.where(not_refractory, self.V + dV, self.V_reset)
-        
-        # Update adaptation with heterogeneous tau_adapt
-        self.adaptation.value = self.adaptation - self.adaptation / self.tau_adapt
-        
-        # Update threshold with adaptation
-        self.V_th.value = self.V_th_base + self.adaptation
-        
-        # Check for spikes
+            total_input += inp
+        # Small noise to break symmetry
+        total_input += bm.random.normal(0., 0.2, self.num)
+
+        # ------------------------------------------------------------------
+        # Refractory counter – decrement by *dt* (time) not by one step
+        # ------------------------------------------------------------------
+        self.refractory.value = bm.maximum(self.refractory - dt, 0.)
+
+        not_refractory = self.refractory <= 0.
+
+        # ------------------------------------------------------------------
+        # Membrane dynamics  dV/dt = (Vrest – V + I)/tau
+        # Euler step: V ← V + dt * dV/dt
+        # ------------------------------------------------------------------
+        dV = ((self.V_rest - self.V) + total_input) / self.tau
+        V_new = bm.where(not_refractory, self.V + dt * dV, self.V)
+
+        # ------------------------------------------------------------------
+        # Spike detection & reset
+        # ------------------------------------------------------------------
         self.spike.value = bm.logical_and(V_new >= self.V_th, not_refractory)
-        
-        # Reset neurons that spiked to their specific reset potentials
         V_new = bm.where(self.spike, self.V_reset, V_new)
-        
-        # Update adaptation for spiking neurons with heterogeneous a_adapt
-        self.adaptation.value = bm.where(self.spike, 
-                                        self.adaptation + self.a_adapt, 
-                                        self.adaptation)
-        
-        # Set refractory period for neurons that spiked
+
+        # ------------------------------------------------------------------
+        # Spike‑frequency adaptation
+        # ------------------------------------------------------------------
+        #   τ_a dA/dt = −A    ⇒  A ← A − dt * A / τ_a
+        self.adaptation.value = self.adaptation - dt * self.adaptation / self.tau_adapt
+        #   Increment A when the neuron fires
+        self.adaptation.value = bm.where(self.spike,
+                                         self.adaptation + self.a_adapt,
+                                         self.adaptation)
+        # Dynamic threshold
+        self.V_th.value = self.V_th_base + self.adaptation
+
+        # ------------------------------------------------------------------
+        # Enter refractory state (time, not steps!)
+        # ------------------------------------------------------------------
         self.refractory.value = bm.where(self.spike, self.tau_ref, self.refractory)
-        
-        # Update voltage
+
+        # ------------------------------------------------------------------
+        # Commit membrane potential and clear synaptic accumulator
+        # ------------------------------------------------------------------
         self.V.value = V_new
-        
-        # Clear input
         self.input[:] = 0.0
-        
+
         return self.spike.value
 
 class PoissonInput(bp.dyn.NeuDyn):
@@ -139,11 +330,7 @@ class PoissonInput(bp.dyn.NeuDyn):
         
         return self.spike.value
 
-
-# ============================================================================
 # Synapse Models
-# ============================================================================
-
 class ExponentialSynapse(bp.dyn.SynConn):
     """Exponential synapse with synaptic delay"""
     def __init__(self, pre, post, conn, g_max=1., tau=10., delay=1.):
@@ -265,10 +452,7 @@ class STDPSynapse(bp.dyn.SynConn):
         
         self.post.input.value += self.g.value
 
-# ============================================================================
 # Network Model
-# ============================================================================
-
 class SpikingDigitClassifier(bp.Network):
     """Multi-layer spiking neural network for digit classification"""
     def __init__(self, n_input=64, n_hidden=100, n_output=10, 
@@ -411,8 +595,8 @@ class SpikingDigitClassifier(bp.Network):
             pre=self.output_layer,
             post=self.output_layer,
             conn=conn_oo,
-            g_max=-8.0,  # MODIFIED: Reduced inhibition from -15.0 to -8.0
-            tau=2.0
+            g_max=-25.0, # lower -> stronger suppression
+            tau=3.0 # lower -> lasts a bit longer
         )
 
         # Make inhibition topology-aware
@@ -420,7 +604,7 @@ class SpikingDigitClassifier(bp.Network):
             for i in range(n_output):
                 for j in range(n_output):
                     if i != j:
-                        # Create Mexican-hat profile: nearby neurons inhibit strongly
+                        # Create Marr wavelet profile: nearby neurons inhibit strongly
                         dist = min(abs(i - j), n_output - abs(i - j))
                         if dist == 1:
                             self.syn_oo.weights[i, j] *= 1.5  # Reduced from 2.0
@@ -453,10 +637,7 @@ class SpikingDigitClassifier(bp.Network):
         
         return self.output_layer.spike.value
 
-
-# ============================================================================
 # Data Processing
-# ============================================================================
 
 def load_and_preprocess_digits():
     """Load digits dataset and preprocess for spiking network"""
@@ -475,24 +656,23 @@ def load_and_preprocess_digits():
     
     return X_train, X_test, y_train, y_test
 
-
 def encode_rate(data, max_rate=100.):
     """Convert normalized data to firing rates"""
     return data * max_rate
 
-
 def decode_spikes(spike_counts, n_classes=10):
-    """Decode class from spike counts"""
-    # If no spikes, return random guess to avoid always predicting 0
-    if np.sum(spike_counts) == 0:
+    """Return class with the highest spike count; break ties at random."""
+    max_count = np.max(spike_counts)
+    if max_count == 0:
+        # no neuron fired – fall back to a random guess
         return np.random.randint(0, n_classes)
-    return np.argmax(spike_counts)
 
+    winners = np.flatnonzero(spike_counts == max_count)
+    if len(winners) == 1:
+        return winners[0]          # clear winner
+    return np.random.choice(winners)   # tie -> pick one at random
 
-# ============================================================================
 # Training and Evaluation
-# ============================================================================
-
 def run_classification_demo():
     """Run a demonstration of digit classification"""
     print("Loading digits dataset...")
@@ -530,8 +710,7 @@ def run_classification_demo():
         # Get sample
         sample = X_test[test_idx]
         label = y_test[test_idx]
-        
-        
+                
         # Convert to firing rates
         input_rates = encode_rate(sample, max_rate=150.)
         
@@ -539,8 +718,7 @@ def run_classification_demo():
         if idx == 0:
             print(f"  Debug - Input rates min: {np.min(input_rates):.1f}, max: {np.max(input_rates):.1f}, mean: {np.mean(input_rates):.1f}")
         
-        # --- FULL NETWORK STATE RESET ---
-        # 1. Reset neuron states with added randomness to break symmetry
+        # Reset neuron states with added randomness to break symmetry
         net.hidden_layer.V[:] = net.hidden_layer.V_rest + bm.random.normal(0, 2.0, net.n_hidden)
         net.output_layer.V[:] = net.output_layer.V_rest + bm.random.normal(0, 2.0, net.n_output)
         
@@ -550,23 +728,21 @@ def run_classification_demo():
         net.hidden_layer.refractory[:] = 0.
         net.output_layer.refractory[:] = 0.
         
-        # 2. Reset adaptation variables and thresholds
+        # Reset adaptation variables and thresholds
         net.hidden_layer.adaptation[:] = bm.random.uniform(0, 0.1, net.n_hidden)
         net.output_layer.adaptation[:] = bm.random.uniform(0, 0.1, net.n_output)
         net.hidden_layer.V_th[:] = net.hidden_layer.V_th_base
         net.output_layer.V_th[:] = net.output_layer.V_th_base
 
-        # 3. Reset synaptic conductances (Crucial for preventing interference between samples)
+        # Reset synaptic conductances (Crucial for preventing interference between samples)
         net.syn_ih.g[:] = 0.
         net.syn_ho.g[:] = 0.
         net.syn_hh.g[:] = 0.
         net.syn_oo.g[:] = 0.
         
-        # 4. Reset input layer states
+        # Reset input layer states
         net.input_layer.spike[:] = False
         net.input_layer.rates[:] = input_rates
-        
-
 
         # Create runner for this sample
         runner = bp.DSRunner(
@@ -579,7 +755,7 @@ def run_classification_demo():
                 'output_spikes': net.output_layer.spike,
             },
             dt=dt,
-            progress_bar=False  # Disable progress bar for cleaner output
+            progress_bar=False
         )
         
         # Run simulation
@@ -715,7 +891,6 @@ def visualize_classification_results(spike_data_list):
     #plt.tight_layout()
     
     plt.show()
-
 
 def analyze_network_activity(net, X_test, y_test, n_samples=5):
     """Analyze network activity patterns with better layout"""
@@ -867,39 +1042,40 @@ def analyze_network_activity(net, X_test, y_test, n_samples=5):
     # Add main title
     fig.suptitle('Network Activity Analysis', fontsize=14, y=0.98)
     
-    plt.tight_layout()
+    #plt.tight_layout()
     plt.show()
 
-
-# Update the test_stdp_learning function to use the new visualization
 def test_stdp_learning():
-    """Test STDP learning effectiveness"""
+    """Test STDP learning effectiveness with model saving"""
     print("\n" + "="*50)
-    print("Testing STDP Learning")
+    print("Testing STDP Learning with Save/Load")
     print("="*50)
+    
+    # Check for existing models
+    model_file = prompt_user_for_model()
+    
+    if model_file is not None:
+        # Load existing model
+        print(f"\nLoading model: {model_file}")
+        net_stdp = load_network_weights(model_file, use_stdp=True)
+        
+        # Ask if user wants to continue training
+        continue_training = input("\nContinue training this model? (y/n): ").lower() == 'y'
+    else:
+        # Create new model
+        print("\nCreating new STDP network...")
+        net_stdp = SpikingDigitClassifier(
+            n_input=64,
+            n_hidden=100,
+            n_output=10,
+            use_stdp=True,
+            connection_prob=0.5
+        )
+        continue_training = True
     
     # Load data
     X_train, X_test, y_train, y_test = load_and_preprocess_digits()
     
-    # Create two networks - one with STDP, one without
-    print("\nCreating networks...")
-    net_stdp = SpikingDigitClassifier(
-        n_input=64,
-        n_hidden=100,
-        n_output=10,
-        use_stdp=True,
-        connection_prob=0.5
-    )
-    
-    net_fixed = SpikingDigitClassifier(
-        n_input=64,
-        n_hidden=100,
-        n_output=10,
-        use_stdp=False,
-        connection_prob=0.5
-    )
-    
-    # Evaluation function
     def evaluate_network(net, X_eval, y_eval, n_samples=20):
         """Evaluate network accuracy"""
         correct = 0
@@ -933,82 +1109,98 @@ def test_stdp_learning():
         return correct / n_samples
     
     # Initial performance
-    print("\nEvaluating initial performance...")
-    init_acc_stdp = evaluate_network(net_stdp, X_test, y_test, 50)
-    init_acc_fixed = evaluate_network(net_fixed, X_test, y_test, 50)
-    print(f"Initial accuracy - STDP: {init_acc_stdp:.2%}, Fixed: {init_acc_fixed:.2%}")
+    print("\nEvaluating current performance...")
+    init_acc = evaluate_network(net_stdp, X_test, y_test, 50)
+    print(f"Current accuracy: {init_acc:.2%}")
     
-    # Store initial weights for comparison
-    if hasattr(net_stdp.syn_ih, 'w'):
-        initial_weights = net_stdp.syn_ih.w.value.copy()
-    
-    # Training phase
-    print("\nTraining with STDP...")
-    n_epochs = 5
-    n_train_samples = 100
-    dt = 0.1
-    T_present = 200.0  # Longer presentation for learning
-    
-    for epoch in range(n_epochs):
-        print(f"\nEpoch {epoch+1}/{n_epochs}")
-        epoch_accuracy = 0
+    if continue_training:
+        # Store initial weights for comparison
+        if hasattr(net_stdp.syn_ih, 'w'):
+            initial_weights = net_stdp.syn_ih.w.value.copy()
         
-        # Shuffle training data
-        indices = np.random.permutation(len(X_train))[:n_train_samples]
+        # Training phase
+        print("\nTraining with STDP...")
+        n_epochs = int(input("Number of training epochs (default 5): ") or "5")
+        n_train_samples = int(input("Number of training samples per epoch (default 100): ") or "100")
+        dt = 0.1
+        T_present = 200.0  # Longer presentation for learning
         
-        for idx, i in enumerate(indices):
-            sample = X_train[i]
-            label = y_train[i]
-            input_rates = encode_rate(sample, max_rate=150.)
+        for epoch in range(n_epochs):
+            print(f"\nEpoch {epoch+1}/{n_epochs}")
+            epoch_accuracy = 0
             
-            # Set input
-            net_stdp.input_layer.rates[:] = input_rates
+            # Shuffle training data
+            indices = np.random.permutation(len(X_train))[:n_train_samples]
             
-            # Run simulation (weights update during this)
-            runner = bp.DSRunner(
-                net_stdp,
-                monitors={'output_spikes': net_stdp.output_layer.spike},
-                dt=dt,
-                progress_bar=False
-            )
+            for idx, i in enumerate(indices):
+                sample = X_train[i]
+                label = y_train[i]
+                input_rates = encode_rate(sample, max_rate=150.)
+                
+                # Set input
+                net_stdp.input_layer.rates[:] = input_rates
+                
+                # Run simulation (weights update during this)
+                runner = bp.DSRunner(
+                    net_stdp,
+                    monitors={'output_spikes': net_stdp.output_layer.spike},
+                    dt=dt,
+                    progress_bar=False
+                )
+                
+                runner.run(T_present)
+                
+                # Check if correct
+                output_spike_counts = np.sum(runner.mon['output_spikes'], axis=0)
+                prediction = decode_spikes(output_spike_counts)
+                if prediction == label:
+                    epoch_accuracy += 1
+                
+                if (idx + 1) % 20 == 0:
+                    print(f"  Processed {idx+1}/{n_train_samples} samples, "
+                          f"running accuracy: {epoch_accuracy/(idx+1):.2%}")
             
-            runner.run(T_present)
-            
-            # Check if correct
-            output_spike_counts = np.sum(runner.mon['output_spikes'], axis=0)
-            prediction = decode_spikes(output_spike_counts)
-            if prediction == label:
-                epoch_accuracy += 1
-            
-            if (idx + 1) % 20 == 0:
-                print(f"  Processed {idx+1}/{n_train_samples} samples, "
-                      f"running accuracy: {epoch_accuracy/(idx+1):.2%}")
+            # Evaluate after each epoch
+            test_acc = evaluate_network(net_stdp, X_test, y_test, 50)
+            print(f"  Test accuracy after epoch {epoch+1}: {test_acc:.2%}")
         
-        # Evaluate after each epoch
-        test_acc = evaluate_network(net_stdp, X_test, y_test, 50)
-        print(f"  Test accuracy after epoch {epoch+1}: {test_acc:.2%}")
-    
-    # Final evaluation
-    print("\nFinal evaluation...")
-    final_acc_stdp = evaluate_network(net_stdp, X_test, y_test, 100)
-    final_acc_fixed = evaluate_network(net_fixed, X_test, y_test, 100)
-    
-    print(f"\nResults:")
-    print(f"STDP Network: {init_acc_stdp:.2%} → {final_acc_stdp:.2%} "
-          f"({final_acc_stdp - init_acc_stdp:+.2%} improvement)")
-    print(f"Fixed Network: {init_acc_fixed:.2%} → {final_acc_fixed:.2%} "
-          f"(no change expected)")
-    
-    # Analyze weight changes
-    if hasattr(net_stdp.syn_ih, 'w'):
-        final_weights = net_stdp.syn_ih.w.value
-        weight_change = np.mean(np.abs(final_weights - initial_weights))
-        print(f"\nAverage weight change: {weight_change:.4f}")
+        # Final evaluation
+        print("\nFinal evaluation...")
+        final_acc = evaluate_network(net_stdp, X_test, y_test, 100)
         
-        # Use the improved visualization
-        visualize_stdp_weights(initial_weights, final_weights)
+        print(f"\nResults:")
+        print(f"Accuracy: {init_acc:.2%} -> {final_acc:.2%} "
+              f"({final_acc - init_acc:+.2%} improvement)")
+        
+        # Analyze weight changes
+        if hasattr(net_stdp.syn_ih, 'w'):
+            final_weights = net_stdp.syn_ih.w.value
+            weight_change = np.mean(np.abs(final_weights - initial_weights))
+            print(f"Average weight change: {weight_change:.4f}")
+            
+            # Visualize weight changes
+            visualize_stdp_weights(initial_weights, final_weights)
+    else:
+        final_acc = init_acc
     
-    return net_stdp, final_acc_stdp
+    # Save model
+    save_choice = input("\nSave this model? (y/n): ").lower()
+    if save_choice == 'y':
+        custom_name = input("Enter filename (press Enter for auto-generated): ").strip()
+        if custom_name and not custom_name.endswith('.pkl'):
+            custom_name += '.pkl'
+        filename = save_network_weights(net_stdp, custom_name if custom_name else None)
+        
+        # Optional: delete old models
+        if len(list_saved_models()) > 5:
+            delete_old = input("\nMore than 5 models saved. Delete oldest models? (y/n): ").lower()
+            if delete_old == 'y':
+                old_models = list_saved_models()[:-5]  # Keep only 5 most recent
+                for old_model in old_models:
+                    os.remove(old_model)
+                    print(f"Deleted: {old_model}")
+    
+    return net_stdp, final_acc
 
 
 def visualize_stdp_weights(initial_weights, final_weights):
@@ -1062,38 +1254,85 @@ def visualize_stdp_weights(initial_weights, final_weights):
     fig.text(0.5, 0.02, f'Mean weight change: {np.mean(np.abs(weight_changes)):.4f}', 
              ha='center', fontsize=10)
     
-    plt.tight_layout()
+    #plt.tight_layout()
     plt.show()
 
-
-# ============================================================================
 # Main execution
-# ============================================================================
 
 if __name__ == "__main__":
     print("Extended LIF Network with Digit Classification")
     print("=" * 50)
     
-    # Run classification demo
-    net, predictions, true_labels = run_classification_demo()
+    # Main menu
+    print("\nWhat would you like to do?")
+    print("1. Run classification demo")
+    print("2. Train/Load STDP model")
+    print("3. Analyze existing model")
     
-    # Analyze network activity
-    print("\nAnalyzing network activity patterns...")
-    X_train, X_test, y_train, y_test = load_and_preprocess_digits()
-    analyze_network_activity(net, X_test, y_test)
+    choice = input("\nEnter your choice (1-3): ")
     
-    # Additional experiments
-    print("\nRunning additional experiments...")
-    
-    # Test with STDP
-    print("\nTesting with STDP learning...")
-    net_stdp = SpikingDigitClassifier(
-        n_input=64,
-        n_hidden=100,
-        n_output=10,
-        use_stdp=True,
-        connection_prob=0.5  # Increased connection probability
-    )
-    
-    if input("\nTest STDP learning? (y/n): ").lower() == 'y':
+    if choice == '1':
+        # Run classification demo
+        net, predictions, true_labels = run_classification_demo()
+        
+        # Analyze network activity
+        print("\nAnalyzing network activity patterns...")
+        X_train, X_test, y_train, y_test = load_and_preprocess_digits()
+        analyze_network_activity(net, X_test, y_test)
+        
+    elif choice == '2':
+        # Train or load STDP model
         net_stdp, accuracy = test_stdp_learning()
+        
+        # Optional: run additional analysis
+        if input("\nAnalyze network activity? (y/n): ").lower() == 'y':
+            X_train, X_test, y_train, y_test = load_and_preprocess_digits()
+            analyze_network_activity(net_stdp, X_test, y_test)
+            
+    elif choice == '3':
+        # Load and analyze existing model
+        model_file = prompt_user_for_model()
+        if model_file is not None:
+            print(f"\nLoading model: {model_file}")
+            net = load_network_weights(model_file, use_stdp=False)
+            
+            # Run analysis
+            X_train, X_test, y_train, y_test = load_and_preprocess_digits()
+            
+            # Quick accuracy check
+            print("\nEvaluating loaded model...")
+            dt = 0.1
+            T_present = 100.0
+            correct = 0
+            n_test = 50
+            
+            for i in range(n_test):
+                sample = X_test[i]
+                label = y_test[i]
+                input_rates = encode_rate(sample, max_rate=150.)
+                
+                net.input_layer.rates[:] = input_rates
+                
+                runner = bp.DSRunner(
+                    net,
+                    monitors={'output_spikes': net.output_layer.spike},
+                    dt=dt,
+                    progress_bar=False
+                )
+                
+                runner.run(T_present)
+                
+                output_spike_counts = np.sum(runner.mon['output_spikes'], axis=0)
+                prediction = decode_spikes(output_spike_counts)
+                
+                if prediction == label:
+                    correct += 1
+            
+            print(f"Accuracy: {correct/n_test:.2%}")
+            
+            # Detailed analysis
+            analyze_network_activity(net, X_test, y_test)
+        else:
+            print("No model selected.")
+    else:
+        print("Invalid choice.")
