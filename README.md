@@ -9,6 +9,7 @@ This project implements a multi-layer spiking neural network with:
 - **Spike-Timing Dependent Plasticity (STDP)** for unsupervised learning
 - **Model persistence** for saving and loading trained networks
 - **Poisson input encoding** for converting pixel intensities to spike trains
+- **Convolution-style connectivity** from input to hidden layer
 - **Lateral inhibition** for competition between neurons
 - **Real-time visualization** of network activity and learning
 
@@ -24,13 +25,14 @@ This project implements a multi-layer spiking neural network with:
 
 ### Network Architecture
 - **Input Layer**: 64 Poisson neurons (8×8 pixel input)
-- **Hidden Layer**: 100 LIF neurons with lateral inhibition
+- **Hidden Layer**: 36 LIF neurons (6×6 spatial arrangement) with lateral inhibition
 - **Output Layer**: 10 LIF neurons (one per digit class)
 - **Synaptic Connections**: 
+  - Convolution-style input→hidden connectivity (3×3 kernels with stride 1)
   - Exponential synapses with configurable delays
-  - Optional STDP learning for input->hidden connections
-  - Winner-take-all dynamics in output layer with Mexican-hat inhibition profile
-  - Structured receptive fields (center-surround, edge detectors)
+  - Optional STDP learning for input→hidden connections
+  - Sparse hidden→output connectivity (70% connection probability)
+  - Winner-take-all dynamics in output layer with distance-dependent inhibition
 
 ### Model Management
 - **Save/Load Functionality**: Complete network state persistence including:
@@ -41,14 +43,16 @@ This project implements a multi-layer spiking neural network with:
 - **Model History**: Timestamped model files with creation dates
 - **Continuous Learning**: Load pre-trained models and continue training
 - **Model Selection Interface**: Interactive menu for managing saved models
+- **Automatic Cleanup**: Option to remove old models when exceeding 5 saved files
 
 ### Visualization Tools
 - Spike raster plots for all layers
 - Membrane potential traces with spike markers
 - Weight distribution analysis
 - Population activity dynamics
-- STDP weight change visualization
-- Classification performance metrics
+- STDP weight change visualization (before/after and delta)
+- Classification confusion matrix
+- Per-class firing rate analysis
 
 ## Requirements
 
@@ -57,7 +61,6 @@ pip install brainpy
 pip install numpy
 pip install matplotlib
 pip install scikit-learn
-pip install scipy
 ```
 
 ## Usage
@@ -100,11 +103,10 @@ Models are saved as `stdp_model_YYYYMMDD_HHMMSS.pkl` containing:
 # Network configuration
 net = SpikingDigitClassifier(
     n_input=64,         # Input neurons (8×8 pixels)
-    n_hidden=100,       # Hidden layer size
     n_output=10,        # Output classes
-    use_stdp=True,      # Enable spike-timing dependent plasticity
-    connection_prob=0.5 # Sparse connectivity
+    use_stdp=True       # Enable spike-timing dependent plasticity
 )
+# Note: n_hidden is automatically calculated as 36 (6×6) based on convolution parameters
 
 # Neuron parameters
 LIFNeuron(
@@ -116,23 +118,38 @@ LIFNeuron(
     heterogeneity=0.1   # Parameter variation (0-1)
 )
 
+# Convolution parameters (input to hidden)
+kernel_size = 3         # 3×3 receptive fields
+stride = 1              # No overlap between kernels
+
 # Training parameters
 n_epochs = 5            # Training epochs
 n_train_samples = 100   # Samples per epoch
 T_present = 200.0       # Presentation time per sample (ms)
+dt = 0.1                # Simulation time step (ms)
 ```
 
 ## How It Works
 
 1. **Input Encoding**: Pixel intensities are converted to Poisson spike trains with rates proportional to intensity (0-150 Hz)
-2. **Signal Propagation**: Spikes propagate through exponential synapses with proper temporal dynamics
-3. **Neural Integration**: LIF neurons integrate inputs according to differential equations with time-based decay
-4. **Competition**: Lateral inhibition creates winner-take-all dynamics with distance-dependent inhibition strength
-5. **Classification**: Output neuron with highest spike count determines predicted digit (with random tie-breaking)
-6. **Learning** (STDP): Synaptic weights are modified based on precise spike timing:
+
+2. **Convolution-Style Processing**: Each hidden neuron receives input from a 3×3 patch of input neurons, creating local receptive fields
+
+3. **Signal Propagation**: Spikes propagate through exponential synapses with proper temporal dynamics
+
+4. **Neural Integration**: LIF neurons integrate inputs according to differential equations with time-based decay
+
+5. **Competition**: 
+   - Hidden layer: Weak lateral inhibition for sparse coding
+   - Output layer: Strong winner-take-all dynamics with distance-dependent inhibition
+
+6. **Classification**: Output neuron with highest spike count determines predicted digit (with random tie-breaking for equal counts)
+
+7. **Learning** (STDP): Synaptic weights are modified based on precise spike timing:
    - Pre-before-post: Long-term potentiation (LTP)
    - Post-before-pre: Long-term depression (LTD)
-7. **State Persistence**: Complete network state can be saved and restored for continued use
+
+8. **State Persistence**: Complete network state can be saved and restored for continued use
 
 ## Network Reset Protocol
 
@@ -143,71 +160,63 @@ Between samples, the network undergoes complete state reset:
 - Synaptic conductances reset to zero
 - Input rates updated for new sample
 
+## Custom Connection Implementation
+
+The network uses a custom `MatrixConn` class that inherits from BrainPy's `TwoEndConnector` to implement the convolution-style connectivity pattern. This allows precise control over which input neurons connect to which hidden neurons while maintaining compatibility with BrainPy's connection system.
+
 ## Example Output
 
 ```
+Extended LIF Network with Digit Classification
+==================================================
+
 What would you like to do?
 1. Run classification demo
 2. Train/Load STDP model
 3. Analyze existing model
 
-Enter your choice (1-3): 2
+Enter your choice (1-3): 1
 
-Saved Models Found:
-==================================================
-1. stdp_model_20240118_143022.pkl (created: 2024-01-18 14:30:22)
-2. stdp_model_20240118_152105.pkl (created: 2024-01-18 15:21:05)
+Loading digits dataset...
+Dataset shape: (1437, 64)
+Number of classes: 10
 
-0. Train a new model
+Creating spiking neural network...
 
-Enter your choice (0 to train new, or model number to load): 1
+Running inference on 20 test samples...
+Sample 1: True=3, Predicted=3, Correct=✓
+  Debug - Output spike counts: [12  8 14 25  9 15 11 13 10 18]
+  Debug - Max output voltage: -47.82
+  Debug - Input spike rate: 7.8 spikes
+  Debug - Hidden spike rate: 15.2 spikes
+  Debug - Total input spikes: 4982
+Sample 2: True=0, Predicted=0, Correct=✓
+...
 
-Loading model: stdp_model_20240118_143022.pkl
-Model loaded from: stdp_model_20240118_143022.pkl
+Accuracy: 30.00%
 
-Continue training this model? (y/n): y
-
-Evaluating current performance...
-Current accuracy: 14.00%
-
-Training with STDP...
-Number of training epochs (default 5): 5
-Number of training samples per epoch (default 100): 100
-
-Epoch 1/5
-  Processed 20/100 samples, running accuracy: 0.00%
-  Processed 40/100 samples, running accuracy: 7.50%
-  Processed 60/100 samples, running accuracy: 6.67%
-  Processed 80/100 samples, running accuracy: 8.75%
-  Processed 100/100 samples, running accuracy: 10.00%
-  Test accuracy after epoch 1: 12.00%
-
-..
-
-Final evaluation...
-Accuracy: 14.00% → 20.00% (+6.00% improvement)
-
-Save this model? (y/n): y
-Model saved to: stdp_model_20240118_160532.pkl
+Analyzing network activity patterns...
+[Visualizations appear]
 ```
 
 ## Biological Inspiration
 
 This implementation incorporates several biologically-inspired mechanisms:
+- **Local receptive fields**: Convolution-style connectivity mimics how neurons in visual cortex respond to local image patches
 - **Heterogeneous neurons**: Each neuron has unique parameters mimicking biological diversity
 - **Temporal dynamics**: All processes respect biological time scales (milliseconds)
 - **Spike-based computation**: Information encoded in precise spike timing and rates
 - **Local learning rules**: STDP implements Hebbian learning ("neurons that fire together, wire together")
 - **Lateral inhibition**: Creates competition similar to cortical circuits
 - **Adaptation**: Neurons adjust their excitability based on recent activity
-- **Synaptic delays**: Signal transmission takes time, as in real neural circuits
 
 ## Troubleshooting
 
-### Low or Uniform Accuracy
+### Low or Random Accuracy
+- The base network without training typically achieves 20-40% accuracy
 - Increase `heterogeneity` parameter to ensure diverse neural responses
-- Verify lateral inhibition strength (increase `g_max` for output layer inhibition)
-- Check input encoding rates (should average 50-100 Hz for active pixels)
+- Verify lateral inhibition strength (adjust `g_max` for inhibitory connections)
+- Check input encoding rates (should see ~5-10 spikes per active pixel)
 - Ensure proper network reset between samples
 
 ### No Learning Progress with STDP
@@ -215,22 +224,39 @@ This implementation incorporates several biologically-inspired mechanisms:
 - Adjust STDP parameters (`A_pre`, `A_post`)
 - Verify spike timing windows (`tau_pre`, `tau_post`)
 - Check that input patterns generate sufficient spiking activity
+- Monitor weight changes during training
 
 ### Model Loading Issues
 - Ensure pickle files are not corrupted
 - Verify BrainPy version compatibility
 - Check that model architecture matches saved parameters
+- Note that the network automatically handles connection matrix restoration
+
+### Connection Errors
+- The custom `MatrixConn` class handles BrainPy's connection interface
+- Ensures compatibility with both tuple and integer size specifications
+- Connection matrices are properly saved and restored with models
+
+## Network Analysis Features
+
+The analysis tools provide insights into:
+- **Firing rate matrix**: Shows how each output neuron responds to each digit class
+- **Weight distributions**: Visualizes synaptic strength patterns
+- **Population dynamics**: Temporal evolution of network activity
+- **Spike count distributions**: Statistical analysis of neural activity levels
 
 ## Future Enhancements
 
-- Convolutional spike layers for better feature extraction
+- Implement more sophisticated convolution patterns (different kernel sizes, strides)
+- Add pooling layers for hierarchical feature extraction
 - Homeostatic plasticity for stable long-term learning
 - GPU acceleration via JAX backend
-- Support for larger image datasets (MNIST, CIFAR)
+- Support for larger image datasets (MNIST, Fashion-MNIST)
 - Online learning during inference
 - Ensemble methods using multiple saved models
-- Visualization of learned receptive fields
+- Visualization of learned convolution kernels
 - Support for different neuron models (Izhikevich, AdEx)
+- Implement backpropagation-through-time for supervised learning
 
 ## License
 

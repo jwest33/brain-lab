@@ -92,9 +92,7 @@ def load_network_weights(filename, use_stdp=True):
     net = SpikingDigitClassifier(
         n_input=model_data['network_params']['n_input'],
         n_hidden=model_data['network_params']['n_hidden'],
-        n_output=model_data['network_params']['n_output'],
-        use_stdp=use_stdp,
-        connection_prob=0.5  # This will be overridden by loaded connections
+        use_stdp=use_stdp
     )
     
     # Restore synaptic weights
@@ -252,44 +250,32 @@ class LIFNeuron(bp.dyn.NeuDyn):
             
     def update(self, inp=None):
         """Integrate one time step (units: ms).  Works for any runner dt."""
-        # ------------------------------------------------------------------
         # Simulation time step in ms
-        # ------------------------------------------------------------------
         dt = float(getattr(self, 'dt', bm.get_dt()))  # brainpy exposes dt
 
-        # ------------------------------------------------------------------
         # Total synaptic + bias input (add optional external 'inp')
-        # ------------------------------------------------------------------
         total_input = (self.input.value + self.bias.value) * self.excitability.value
         if inp is not None:
             total_input += inp
         # Small noise to break symmetry
         total_input += bm.random.normal(0., 0.2, self.num)
 
-        # ------------------------------------------------------------------
         # Refractory counter – decrement by *dt* (time) not by one step
-        # ------------------------------------------------------------------
         self.refractory.value = bm.maximum(self.refractory - dt, 0.)
 
         not_refractory = self.refractory <= 0.
 
-        # ------------------------------------------------------------------
-        # Membrane dynamics  dV/dt = (Vrest – V + I)/tau
-        # Euler step: V ← V + dt * dV/dt
-        # ------------------------------------------------------------------
+        # Membrane dynamics  dV/dt = (Vrest – V + I)/tau
+        # Euler step: V <- V + dt * dV/dt
         dV = ((self.V_rest - self.V) + total_input) / self.tau
         V_new = bm.where(not_refractory, self.V + dt * dV, self.V)
 
-        # ------------------------------------------------------------------
         # Spike detection & reset
-        # ------------------------------------------------------------------
         self.spike.value = bm.logical_and(V_new >= self.V_th, not_refractory)
         V_new = bm.where(self.spike, self.V_reset, V_new)
 
-        # ------------------------------------------------------------------
         # Spike‑frequency adaptation
-        # ------------------------------------------------------------------
-        #   τ_a dA/dt = −A    ⇒  A ← A − dt * A / τ_a
+        #   τ_a dA/dt = −A    ⇒  A <- A − dt * A / τ_a
         self.adaptation.value = self.adaptation - dt * self.adaptation / self.tau_adapt
         #   Increment A when the neuron fires
         self.adaptation.value = bm.where(self.spike,
@@ -298,14 +284,10 @@ class LIFNeuron(bp.dyn.NeuDyn):
         # Dynamic threshold
         self.V_th.value = self.V_th_base + self.adaptation
 
-        # ------------------------------------------------------------------
         # Enter refractory state (time, not steps!)
-        # ------------------------------------------------------------------
         self.refractory.value = bm.where(self.spike, self.tau_ref, self.refractory)
 
-        # ------------------------------------------------------------------
         # Commit membrane potential and clear synaptic accumulator
-        # ------------------------------------------------------------------
         self.V.value = V_new
         self.input[:] = 0.0
 
@@ -329,6 +311,41 @@ class PoissonInput(bp.dyn.NeuDyn):
 
         
         return self.spike.value
+
+# Custom Connection Class
+class MatrixConn(bp.conn.TwoEndConnector):
+    """Custom connection class that uses a pre-defined connection matrix"""
+    def __init__(self, conn_mat):
+        self.conn_mat = conn_mat
+        # Initialize the parent class without size arguments
+        super().__init__()
+        # Set sizes manually
+        self.pre_size = conn_mat.shape[0]
+        self.post_size = conn_mat.shape[1]
+    
+    def __call__(self, pre_size, post_size):
+        # This method is called by BrainPy to build the connection
+        # Handle both tuple and int inputs
+        if isinstance(pre_size, tuple):
+            pre_size = pre_size[0] if len(pre_size) == 1 else pre_size
+        if isinstance(post_size, tuple):
+            post_size = post_size[0] if len(post_size) == 1 else post_size
+            
+        # For comparison, also handle our stored sizes
+        expected_pre = self.pre_size[0] if isinstance(self.pre_size, tuple) else self.pre_size
+        expected_post = self.post_size[0] if isinstance(self.post_size, tuple) else self.post_size
+        
+        assert pre_size == expected_pre, f"Pre size mismatch: {pre_size} != {expected_pre}"
+        assert post_size == expected_post, f"Post size mismatch: {post_size} != {expected_post}"
+        
+        i_indices, j_indices = np.where(self.conn_mat)
+        return bp.connect.IJConn(i=i_indices, j=j_indices)(pre_size, post_size)
+    
+    def require(self, key):
+        if key == 'conn_mat':
+            return self.conn_mat
+        else:
+            return super().require(key)
 
 # Synapse Models
 class ExponentialSynapse(bp.dyn.SynConn):
@@ -415,6 +432,7 @@ class STDPSynapse(bp.dyn.SynConn):
         self.trace_pre = bm.Variable(bm.zeros(pre.num))
         self.trace_post = bm.Variable(bm.zeros(post.num))
         
+        
     def update(self):
         # Update synaptic conductance with correct decay
         self.g.value *= bm.exp(-bm.dt / self.tau)
@@ -454,54 +472,64 @@ class STDPSynapse(bp.dyn.SynConn):
 
 # Network Model
 class SpikingDigitClassifier(bp.Network):
-    """Multi-layer spiking neural network for digit classification"""
-    def __init__(self, n_input=64, n_hidden=100, n_output=10, 
-                 use_stdp=False, connection_prob=0.5):
+    """Multi-layer spiking neural network for digit classification with convolution-style input layer"""
+    def __init__(self, n_input=64, n_output=10, use_stdp=False):
         super().__init__()
-        
+
         self.n_input = n_input
-        self.n_hidden = n_hidden
         self.n_output = n_output
-        
+
+        # === Convolution-style input to hidden setup ===
+        kernel_size = 3
+        stride = 1
+        input_side = 8  # for 8x8 digit images
+        output_side = (input_side - kernel_size) // stride + 1
+        n_hidden = output_side ** 2  # 6x6 = 36
+        self.n_hidden = n_hidden
+
         # Input layer (Poisson neurons)
-        self.input_layer = PoissonInput(size=n_input, freq_max=200.)  # Increased max frequency
-        
+        self.input_layer = PoissonInput(size=n_input, freq_max=200.)
+
         # Hidden layer
         self.hidden_layer = LIFNeuron(
-            size=n_hidden, 
-            V_rest=-65., 
-            V_th=-52.,
-            V_reset=-65., 
-            tau=20., 
-            tau_ref=3.,
-            tau_adapt=100.,
-            a_adapt=0.005,
-            heterogeneity=0.1  # Moderate heterogeneity
+            size=n_hidden,
+            V_rest=-65., V_th=-52., V_reset=-65.,
+            tau=20., tau_ref=3.,
+            tau_adapt=100., a_adapt=0.005,
+            heterogeneity=0.1
         )
-        
+
         # Output layer
         output_bias = bm.random.uniform(-3, 3, n_output)
         self.output_layer = LIFNeuron(
             size=n_output,
-            V_rest=-65.,
-            V_th=-54.,
-            V_reset=-65.,
-            tau=15.,
-            tau_ref=2.,
-            tau_adapt=50.,
-            a_adapt=0.01,
+            V_rest=-65., V_th=-54., V_reset=-65.,
+            tau=15., tau_ref=2.,
+            tau_adapt=50., a_adapt=0.01,
             bias=output_bias,
-            heterogeneity=0.2  # Higher heterogeneity for output neurons
+            heterogeneity=0.2
         )
-                
-        # Input to Hidden: structured connectivity
-        conn_ih = bp.conn.FixedProb(prob=connection_prob)
+
+        # Build conv-style connection matrix
+        conn_mat = np.zeros((n_input, n_hidden), dtype=bool)
+        h_idx = 0
+        for y in range(0, input_side - kernel_size + 1, stride):
+            for x in range(0, input_side - kernel_size + 1, stride):
+                for dy in range(kernel_size):
+                    for dx in range(kernel_size):
+                        input_idx = (y + dy) * input_side + (x + dx)
+                        conn_mat[input_idx, h_idx] = True
+                h_idx += 1
+
+        # Create custom connection using our MatrixConn class
+        conn_ih = MatrixConn(conn_mat)
+        
         if use_stdp:
             self.syn_ih = STDPSynapse(
                 pre=self.input_layer,
                 post=self.hidden_layer,
                 conn=conn_ih,
-                g_max=30.0,  # Increased initial weight
+                g_max=30.0,
                 tau=10.0,
                 A_pre=0.01,
                 A_post=0.01
@@ -511,46 +539,11 @@ class SpikingDigitClassifier(bp.Network):
                 pre=self.input_layer,
                 post=self.hidden_layer,
                 conn=conn_ih,
-                g_max=30.0,  # Stronger input drive
+                g_max=30.0,
                 tau=10.0
             )
-            
-        # Better receptive field initialization
-        if hasattr(self.syn_ih, 'weights'):
-            # Create diverse receptive fields
-            for h in range(n_hidden):
-                # Different types of receptive fields
-                rf_type = h % 4
-                
-                if rf_type == 0:  # Center-surround
-                    x_center = np.random.uniform(2, 6)
-                    y_center = np.random.uniform(2, 6)
-                    for i in range(n_input):
-                        x, y = i % 8, i // 8
-                        dist = np.sqrt((x - x_center)**2 + (y - y_center)**2)
-                        if dist < 2:
-                            self.syn_ih.weights[i, h] *= 2.0
-                        elif dist < 4:
-                            self.syn_ih.weights[i, h] *= 0.5
-                            
-                elif rf_type == 1:  # Horizontal edge detector
-                    preferred_y = np.random.randint(1, 7)
-                    for i in range(n_input):
-                        x, y = i % 8, i // 8
-                        if abs(y - preferred_y) < 1:
-                            self.syn_ih.weights[i, h] *= 2.0
-                            
-                elif rf_type == 2:  # Vertical edge detector
-                    preferred_x = np.random.randint(1, 7)
-                    for i in range(n_input):
-                        x, y = i % 8, i // 8
-                        if abs(x - preferred_x) < 1:
-                            self.syn_ih.weights[i, h] *= 2.0
-                            
-                else:  # Random pattern
-                    self.syn_ih.weights[:, h] *= bm.random.uniform(0.5, 2.0, n_input)
-        
-        # Hidden to Output: sparse connectivity for more specialization
+
+        # Hidden to Output: sparse connectivity
         conn_ho = bp.conn.FixedProb(prob=0.7)
         self.syn_ho = ExponentialSynapse(
             pre=self.hidden_layer,
@@ -560,59 +553,51 @@ class SpikingDigitClassifier(bp.Network):
             tau=15.0
         )
 
-        # Better class-specific initialization
+        # Class-specific weight enhancement
         if hasattr(self.syn_ho, 'weights'):
-            # Create stronger class-specific biases
             n_hidden_per_class = n_hidden // n_output
             for i in range(n_output):
-                # Make specific hidden neurons strongly connected to each output
                 start_idx = i * n_hidden_per_class
                 end_idx = (i + 1) * n_hidden_per_class
-                
-                # Strengthen connections from "dedicated" hidden neurons
                 self.syn_ho.weights[start_idx:end_idx, i] *= 2.0
-                
-                # Add more random variation
-                random_factor = bm.random.uniform(0.5, 1.5, self.syn_ho.weights.shape[0])
-                self.syn_ho.weights[:, i] *= random_factor
-        
-        # Add diverse initial voltages to break symmetry
+                self.syn_ho.weights[:, i] *= bm.random.uniform(0.5, 1.5, self.syn_ho.weights.shape[0])
+
+        # Diverse initial voltages
         self.output_layer.V[:] = self.output_layer.V_rest + bm.random.normal(0, 2, n_output)
-        
+
         # Lateral inhibition in hidden layer
         conn_hh = bp.conn.All2All(include_self=False)
         self.syn_hh = ExponentialSynapse(
             pre=self.hidden_layer,
             post=self.hidden_layer,
             conn=conn_hh,
-            g_max=-0.5,  # Very weak inhibition to allow diverse activity
+            g_max=-0.5,
             tau=5.0
         )
-        
+
         # Lateral inhibition in output layer (winner-take-all)
         conn_oo = bp.conn.All2All(include_self=False)
         self.syn_oo = ExponentialSynapse(
             pre=self.output_layer,
             post=self.output_layer,
             conn=conn_oo,
-            g_max=-25.0, # lower -> stronger suppression
-            tau=3.0 # lower -> lasts a bit longer
+            g_max=-25.0,
+            tau=3.0
         )
 
-        # Make inhibition topology-aware
+        # Inhibition shaped by distance (Marr wavelet-inspired)
         if hasattr(self.syn_oo, 'weights'):
             for i in range(n_output):
                 for j in range(n_output):
                     if i != j:
-                        # Create Marr wavelet profile: nearby neurons inhibit strongly
                         dist = min(abs(i - j), n_output - abs(i - j))
                         if dist == 1:
-                            self.syn_oo.weights[i, j] *= 1.5  # Reduced from 2.0
+                            self.syn_oo.weights[i, j] *= 1.5
                         elif dist == 2:
-                            self.syn_oo.weights[i, j] *= 0.75 # Adjusted from 0.5
+                            self.syn_oo.weights[i, j] *= 0.75
                         else:
-                            self.syn_oo.weights[i, j] *= 0.25 # Adjusted from 0.1
-        
+                            self.syn_oo.weights[i, j] *= 0.25
+
     def update(self):
         # Update input layer (pass None to use internal rates)
         self.input_layer.update()
@@ -685,12 +670,10 @@ def run_classification_demo():
     print("\nCreating spiking neural network...")
     net = SpikingDigitClassifier(
         n_input=64,
-        n_hidden=100,
         n_output=10,
-        use_stdp=False,
-        connection_prob=0.5  # Increased connection probability
+        use_stdp=False
     )
-    
+
     # Simulation parameters
     dt = 0.1
     T_present = 100.0  # Time to present each sample
@@ -1066,10 +1049,8 @@ def test_stdp_learning():
         print("\nCreating new STDP network...")
         net_stdp = SpikingDigitClassifier(
             n_input=64,
-            n_hidden=100,
             n_output=10,
-            use_stdp=True,
-            connection_prob=0.5
+            use_stdp=True
         )
         continue_training = True
     
@@ -1202,7 +1183,6 @@ def test_stdp_learning():
     
     return net_stdp, final_acc
 
-
 def visualize_stdp_weights(initial_weights, final_weights):
     """Visualize STDP weight changes with better layout"""
     # Create figure with appropriate size
@@ -1222,6 +1202,17 @@ def visualize_stdp_weights(initial_weights, final_weights):
                      vmin=vmin, vmax=vmax, interpolation='nearest')
     ax1.set_title('Initial Weights (first 30 hidden)', fontsize=12)
     ax1.set_xlabel('Hidden neurons', fontsize=10)
+    ax1.set_ylabel('Input neurons', fontsize=10)
+    ax1.tick_params(labelsize=9)
+    cbar1 = plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+    cbar1.ax.tick_params(labelsize=8)
+    
+    # Final weights
+    ax2 = fig.add_subplot(132)
+    im2 = ax2.imshow(final_weights[:, :30], aspect='auto', cmap='hot',
+                     vmin=vmin, vmax=vmax, interpolation='nearest')
+    ax2.set_title('Final Weights (first 30 hidden)', fontsize=12)
+    ax2.set_xlabel('Hidden neurons', fontsize=10)
     ax1.set_ylabel('Input neurons', fontsize=10)
     ax1.tick_params(labelsize=9)
     cbar1 = plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
